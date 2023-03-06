@@ -1,0 +1,64 @@
+from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.exceptions import HTTPException
+from functools import update_wrapper
+from datetime import datetime, timedelta
+
+app = Flask(__name__)
+limiter = Limiter(app, key_func=get_remote_address)
+
+# Define the rate limiting rules based on the ISO standard
+# (See https://tools.ietf.org/html/rfc6585 for more details)
+limiter.limit("1000/day")(app)
+limiter.limit("200/hour")(app)
+limiter.limit("50/minute")(app)
+
+# Custom error handling for rate limit exceeded errors
+@app.errorhandler(HTTPException)
+def handle_exception(e):
+    if isinstance(e, HTTPException):
+        response = e.get_response()
+        response.data = jsonify({
+            "error": e.description,
+            "retry-after": int((e.headers.get("Retry-After") or 0)) + 1,
+            "timestamp": datetime.now().isoformat()
+        })
+        response.headers["Content-Type"] = "application/json"
+        response.headers["Retry-After"] = str(int((e.headers.get("Retry-After") or 0)) + 1)
+        return response
+
+# Custom rate limit header
+@app.after_request
+def inject_x_rate_headers(response):
+    limit_header = response.headers.get("X-RateLimit-Limit")
+    remaining_header = response.headers.get("X-RateLimit-Remaining")
+    reset_header = response.headers.get("X-RateLimit-Reset")
+    if limit_header and remaining_header and reset_header:
+        response.headers["X-RateLimit-Limit"] = limit_header
+        response.headers["X-RateLimit-Remaining"] = remaining_header
+        response.headers["X-RateLimit-Reset"] = reset_header
+    return response
+
+# Add CORS headers for cross-origin requests
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    return response
+
+# Decorator for enabling CORS on a route
+def enable_cors(f):
+    def wrapper(*args, **kwargs):
+        response = f(*args, **kwargs)
+        return add_cors_headers(response)
+    return update_wrapper(wrapper, f)
+
+# Example route
+@app.route("/")
+@enable_cors
+def hello_world():
+    return "Hello, World!"
+
+if __name__ == "__main__":
+    app.run()
